@@ -239,10 +239,28 @@ Matched 19 titles to an IMDb id.
 
 ## Troubleshooting
 
-**`{"err":"handler error"}` from the catalog endpoint**
-The addon could not read the library. Check the logs
+**A catalog tile reads "Gerbera unavailable — ..."**
+The library could not be read; the tile carries the reason. Check the logs
 (`docker compose logs -f stremio-gerbera-addon`) and confirm
-`GERBERA_URL/description.xml` is reachable from inside the container.
+`GERBERA_URL/description.xml` is reachable from inside the container:
+
+```bash
+docker exec stremio-gerbera-addon wget -qO- "$GERBERA_URL/description.xml" | head
+```
+
+**`Entity expansion limit exceeded` in the logs**
+A ContentDirectory response carries its DIDL-Lite payload inside `<Result>` as
+an XML-escaped string, so every markup character arrives as an entity —
+thousands per page. fast-xml-parser 4.5.3 and later cap entity expansion at
+1000 by default, which aborts the parse on any non-trivial library. The addon
+avoids this by parsing SOAP envelopes with entity processing disabled and
+unescaping the payload itself, so this should not occur; if it reappears after
+changing dependencies, check that `soapParser` in [`gerbera.js`](gerbera.js)
+still sets `processEntities: false`.
+
+Dependencies are pinned through `package-lock.json` and installed with
+`npm ci`, so a rebuild cannot silently pick up a parser version that behaves
+differently.
 
 **`socket hang up` in the logs**
 Gerbera closes the TCP connection after every SOAP response while Node keeps

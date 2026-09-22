@@ -15,7 +15,36 @@ const { XMLParser } = require('fast-xml-parser');
 
 const agent = new http.Agent({ keepAlive: false, maxSockets: 4 });
 
-const xmlParser = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: '@_' });
+const XML_OPTS = { ignoreAttributes: false, attributeNamePrefix: '@_' };
+
+// Ordinary parser, used for the device description and for DIDL-Lite payloads.
+// `entityExpansionLimit` is raised for very large libraries; it is ignored by
+// parser versions that predate the option.
+const xmlParser = new XMLParser({ ...XML_OPTS, entityExpansionLimit: 1e7 });
+
+// Parser for SOAP envelopes, with entity processing switched OFF.
+//
+// A ContentDirectory response carries its DIDL-Lite payload inside <Result> as
+// an XML-escaped string, so every single markup character arrives as an entity
+// — over 7000 of them for a page of 500 items. fast-xml-parser 4.5.3 and newer
+// cap entity expansion at 1000 by default (protection against "billion laughs"
+// attacks) and abort the parse. Letting the parser expand that payload is
+// pointless work anyway: `unescapeXml` below does it in one pass, and the
+// result is parsed separately as real XML.
+const soapParser = new XMLParser({ ...XML_OPTS, processEntities: false });
+
+/** Expands the five predefined XML entities plus numeric character references. */
+function unescapeXml(text) {
+  return String(text)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCodePoint(parseInt(hex, 16)))
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCodePoint(Number(dec)))
+    // Must come last, so that "&amp;lt;" survives as the literal text "&lt;".
+    .replace(/&amp;/g, '&');
+}
 
 const CDS_TYPE = 'urn:schemas-upnp-org:service:ContentDirectory:1';
 
@@ -72,7 +101,7 @@ async function soap(baseUrl, action, innerXml) {
     },
   });
 
-  const env = xmlParser.parse(data)['s:Envelope'];
+  const env = soapParser.parse(data)['s:Envelope'];
   if (!env) throw new Error(`Unexpected SOAP response to ${action}`);
   const resp = env['s:Body'][`u:${action}Response`];
   if (!resp) throw new Error(`No ${action}Response in the Gerbera server reply`);
@@ -81,11 +110,11 @@ async function soap(baseUrl, action, innerXml) {
 
 /**
  * Extracts DIDL-Lite containers and items from a SOAP response.
- * The `Result` element holds XML-escaped DIDL-Lite, so it has to be parsed
- * a second time.
+ * The `Result` element holds XML-escaped DIDL-Lite, so it is unescaped and
+ * then parsed as a document of its own.
  */
 function parseDidl(resp) {
-  const didl = xmlParser.parse(String(resp.Result || ''))['DIDL-Lite'] || {};
+  const didl = xmlParser.parse(unescapeXml(resp.Result || ''))['DIDL-Lite'] || {};
   let containers = didl.container || [];
   let items = didl.item || [];
   if (!Array.isArray(containers)) containers = [containers];
@@ -175,6 +204,9 @@ async function crawlVideos(baseUrl, objectID = '0', depth = 0, maxDepth = 8, acc
   try {
     page = await browse(baseUrl, objectID);
   } catch (err) {
+    // One awkward folder should not abort the whole scan, but a failure at the
+    // root means the library could not be read at all — let that propagate.
+    if (depth === 0) throw err;
     console.warn(`Skipping objectID=${objectID} (browse failed): ${err.message}`);
     return acc;
   }
@@ -204,6 +236,11 @@ async function crawlVideos(baseUrl, objectID = '0', depth = 0, maxDepth = 8, acc
  * and duration.
  */
 async function getAllVideos(baseUrl) {
+  // Resolve the control URL up front. Both paths below tolerate per-request
+  // failures, so without this an unreachable server would quietly look like an
+  // empty library instead of reporting an error.
+  await getControlUrl(baseUrl);
+
   let raw = [];
 
   if (await supportsSearch(baseUrl)) {

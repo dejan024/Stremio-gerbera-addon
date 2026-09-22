@@ -2,8 +2,10 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+# The lockfile is copied in as well, so the image always builds against the
+# exact dependency versions the addon was tested with.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY index.js gerbera.js parse.js cinemeta.js library.js ./
 

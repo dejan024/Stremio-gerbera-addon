@@ -86,8 +86,26 @@ function seriesMeta(s) {
   };
 }
 
-builder.defineCatalogHandler(async ({ id, extra }) => {
+/**
+ * Surfaces a failed scan as a single catalog tile.
+ * Stremio renders a thrown handler error as an opaque "HTTP status code 500",
+ * which says nothing about the cause, so the reason is shown in the UI instead.
+ */
+function errorMeta(type) {
+  return {
+    id: 'gerbera:error',
+    type,
+    name: `Gerbera unavailable — ${state.error}`,
+    description: `Could not read the library from ${GERBERA_URL}. ` +
+      'Check the addon logs and that the server is reachable.',
+    posterShape: 'landscape',
+  };
+}
+
+builder.defineCatalogHandler(async ({ type, id, extra }) => {
   await ensureFresh();
+
+  if (!state.ready && state.error) return { metas: [errorMeta(type)] };
 
   const search = (extra && extra.search) || null;
   const skip = Number((extra && extra.skip) || 0);

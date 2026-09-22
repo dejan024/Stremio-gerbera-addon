@@ -171,13 +171,13 @@ async function ensureFresh() {
   if (state.ready && ageMin < REFRESH_MINUTES) return;
   if (scanning) return scanning;
 
+  // A failed scan never rejects: a refresh keeps serving the previous results,
+  // and a failed first scan leaves the library empty with `state.error` set, so
+  // the handlers can report the reason instead of returning a bare HTTP 500.
   scanning = scan()
     .catch(err => {
       state.error = err.message;
-      console.error('Gerbera scan failed:', err.message);
-      // A failed refresh keeps serving the previous results; only the very
-      // first scan is fatal, since there is nothing to fall back to.
-      if (!state.ready) throw err;
+      console.error('Gerbera scan failed:', err.stack || err.message);
     })
     .finally(() => { scanning = null; });
 
