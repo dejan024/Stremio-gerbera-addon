@@ -45,10 +45,14 @@ cd stremio-gerbera-addon
 cp .env.example .env
 ```
 
-> **Keep the directory name lowercase.** Docker Compose derives the project name
-> from the directory and lowercases it, while Dockge matches the stack folder
-> name against the project name literally. A capitalised folder makes Dockge
-> report the stack as `inactive` even though the containers are running.
+> **Keep the directory name lowercase** — note that the clone command above
+> renames it. This is a general rule for Compose stacks rather than anything
+> specific to this addon: Docker Compose takes the project name from the
+> directory it runs in and lowercases it, because project names may only
+> contain lowercase letters, digits, dashes and underscores. Compose managers
+> match their stack folder against that project name literally, so a
+> capitalised folder leaves the two unable to pair up. In Dockge, for instance,
+> the stack is listed as `inactive` while its containers are in fact running.
 
 Edit `.env` and point `GERBERA_URL` at your server, then generate a
 certificate (see [HTTPS](#https-why-its-required) below) and start it:
