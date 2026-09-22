@@ -39,6 +39,8 @@ supports HTTP Range requests, seeking works normally.
   any UPnP MediaServer exposing `ContentDirectory` should work)
 - Docker and Docker Compose, **or** Node.js 18+
 - Stremio client on the same network as the Gerbera server
+- Outbound internet access, if you want posters and descriptions. It is not
+  required: an air-gapped install serves the same library from filenames.
 
 ---
 
@@ -59,8 +61,12 @@ cp .env.example .env
 > capitalised folder leaves the two unable to pair up. In Dockge, for instance,
 > the stack is listed as `inactive` while its containers are in fact running.
 
-Edit `.env` and point `GERBERA_URL` at your server, then generate a
-certificate (see [HTTPS](#https-why-its-required) below) and start it:
+Edit `.env` and point `GERBERA_URL` at your server. Nothing else in it has to
+be touched — posters and descriptions are on by default and need no API key;
+see [Metadata](#metadata) for the optional second provider.
+
+Then generate a certificate (see [HTTPS](#https-why-its-required) below) and
+start it:
 
 ```bash
 docker compose up -d --build
@@ -324,6 +330,10 @@ npm install
 GERBERA_URL=http://192.168.1.10:49494 PORT=7100 npm start
 ```
 
+Both cache files default to a `cache/` directory next to `index.js`, which is
+created on first write. Point `CACHE_FILE` and `META_CACHE_FILE` somewhere
+writable if the code lives in a read-only location.
+
 A `systemd` unit for a permanent install:
 
 ```ini
@@ -337,6 +347,9 @@ WorkingDirectory=/opt/stremio-gerbera-addon
 Environment=GERBERA_URL=http://192.168.1.10:49494
 Environment=PORT=7100
 Environment=CACHE_FILE=/opt/stremio-gerbera-addon/cache/imdb.json
+Environment=META_CACHE_FILE=/opt/stremio-gerbera-addon/cache/meta.json
+# Optional second metadata provider; leave it out to run on Cinemeta alone.
+#Environment=TMDB_API_KEY=0123456789abcdef0123456789abcdef
 ExecStart=/usr/bin/node index.js
 Restart=on-failure
 
@@ -560,9 +573,63 @@ Its filename did not resolve to an IMDb id. It remains playable from the
 with the release year, usually fixes it.
 
 **Series are not detected**
-Episode detection relies on `S02E01`, `2x01` or `Season 2 Episode 1` appearing
-in the filename. Files without one of those patterns are treated as movies or
-other clips.
+Episode detection relies on `S02E01`, `2x01` or `Season 2 Episode 1` in the
+filename, plus whatever
+[`parse-torrent-title`](https://www.npmjs.com/package/parse-torrent-title)
+recognises beyond those. A file with no episode marker at all is treated as a
+movie or an other clip.
+
+**Cards still show filenames, with no poster**
+Check `/health` first — during the first scan after an upgrade the catalog is
+served before the metadata is in:
+
+```bash
+docker exec stremio-gerbera-addon wget -qO- http://127.0.0.1:7100/health
+```
+
+`enriching: true` means it is still working; give it a few minutes on a large
+library. If `enriching` is `false` and `enriched` is `0`, the pass found
+nothing — confirm `META_ENRICH` is not set to `false`, and that the container
+can reach the internet:
+
+```bash
+docker exec stremio-gerbera-addon wget -qO- https://v3-cinemeta.strem.io/meta/movie/tt0397313.json | head -c 200
+```
+
+Individual titles that stay bare are simply unrecognised; see the next two
+entries.
+
+**`TMDB rejected the API key (401)` in the logs**
+The key is wrong, or it is the *Read Access Token* rather than the **API Key
+(v3 auth)** — only the short 32-character hex string works here. TMDB
+switches itself off for the rest of the run after the first rejection, so the
+addon keeps going on Cinemeta alone. Fix the key and recreate the container.
+
+**A title got matched to the wrong film**
+Rename the file closer to `Title (Year).ext` and rescan. The wrong record is
+cached, so clear it too:
+
+```bash
+docker compose stop stremio-gerbera-addon
+rm cache/meta.json
+docker compose up -d
+```
+
+That forces a full re-fetch of the whole library, which is the slow path —
+there is no per-title invalidation. A miss expires on its own after
+`META_MISS_TTL_DAYS`, so a title nothing recognised today is retried in a few
+days without any intervention.
+
+**Metadata did not change after renaming files**
+Renaming produces a new title, so it is looked up fresh — but only on the
+next rescan, up to `REFRESH_MINUTES` later. `docker compose restart
+stremio-gerbera-addon` triggers one immediately.
+
+**A show's page lists episodes that are not on the server**
+Expected. A recognised series is published under its IMDb id, so Stremio
+renders the provider's full episode list; only the episodes you actually have
+return a Gerbera source. Series the providers do not recognise are drawn by
+the addon itself and list local episodes only.
 
 ---
 
