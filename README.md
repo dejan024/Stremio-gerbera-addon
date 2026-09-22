@@ -40,10 +40,15 @@ supports HTTP Range requests, seeking works normally.
 ## Quick start
 
 ```bash
-git clone https://github.com/dejan024/Stremio-gerbera-addon.git
-cd Stremio-gerbera-addon
+git clone https://github.com/dejan024/Stremio-gerbera-addon.git stremio-gerbera-addon
+cd stremio-gerbera-addon
 cp .env.example .env
 ```
+
+> **Keep the directory name lowercase.** Docker Compose derives the project name
+> from the directory and lowercases it, while Dockge matches the stack folder
+> name against the project name literally. A capitalised folder makes Dockge
+> report the stack as `inactive` even though the containers are running.
 
 Edit `.env` and point `GERBERA_URL` at your server, then generate a
 certificate (see [HTTPS](#https-why-its-required) below) and start it:
