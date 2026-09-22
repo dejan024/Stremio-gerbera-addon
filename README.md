@@ -41,6 +41,9 @@ supports HTTP Range requests, seeking works normally.
 - Stremio client on the same network as the Gerbera server
 - Outbound internet access, if you want posters and descriptions. It is not
   required: an air-gapped install serves the same library from filenames.
+- A domain on Cloudflare, **only** if a TV is going to use the addon. A TV
+  cannot be made to trust a self-signed certificate, so it needs a real one;
+  see [HTTPS](#https-why-its-required). Every other client is fine without.
 
 ---
 
@@ -98,8 +101,26 @@ without it Docker keeps running the old code. Your `.env`, `certs/` and
 
 Stremio refuses to install an addon over plain HTTP unless it is served from
 `127.0.0.1`. This is enforced by the Stremio client itself, not by a browser,
-so it applies to the desktop app too. A self-signed certificate is enough —
-nothing ever leaves your network.
+so it applies to the desktop app too.
+
+There are two ways to satisfy it, and which one you need depends entirely on
+what is going to watch:
+
+| | Self-signed | Let's Encrypt |
+|---|---|---|
+| Setup | one `openssl` command | a domain on Cloudflare, an API token |
+| Trusted by | every machine where you import it | everything, automatically |
+| Works on a TV | **no** | yes |
+| Needs a domain | no | yes |
+| Needs the internet | no | for issuance and renewal |
+
+**Self-signed is the default and is the right choice** for a desktop-only or
+offline setup — nothing ever leaves your network. Skip to
+[when a client cannot be made to trust it](#when-a-client-cannot-be-made-to-trust-it)
+only if a TV is in the picture; nothing else about the addon changes between
+the two, and you can switch back by putting one line in `.env`.
+
+### Self-signed
 
 Generate one for your server's IP:
 
@@ -137,11 +158,23 @@ the operating system trust store:
 
 ### When a client cannot be made to trust it
 
-A TV cannot. Neither Samsung's Tizen nor LG's webOS offers any way to import a
-certificate, and the Stremio app on them shows no "continue anyway" prompt — it
-simply gets nothing back, and the catalog stays empty with no error. Syncing
-the addon from a desktop where the certificate *is* trusted does not help: the
-TV still makes its own request, and fails it on its own.
+**A Samsung (Tizen) TV cannot, and neither can an LG (webOS) one.** Both run
+Stremio as a sandboxed web app over a system trust store you have no access
+to: there is no certificate import anywhere in the TV's settings, and no
+"continue anyway" prompt when the handshake fails. The app simply gets nothing
+back, so the addon looks installed and every one of its catalogs is empty,
+with no error shown anywhere.
+
+Two things that sound like they should help do not:
+
+- **Installing the addon from a desktop where the certificate is trusted.**
+  Addons sync through the Stremio account, but only the URL travels. The TV
+  still makes its own request to it, and fails it on its own.
+- **Typing the address on the TV instead.** Same request, same failure — and
+  on most TVs there is no field to type it into to begin with.
+
+So if a TV is going to use the addon, its certificate has to come from an
+authority the TV already trusts, which means a real one.
 
 The way out is a certificate from a real authority, for a real domain name
 whose A record points at this server's **LAN** address. Nothing is published:
@@ -163,9 +196,23 @@ is enough; the nameservers are what matters, not where the domain was bought).
 Cloudflare warns that the address is private. That is the intent.
 
 **2. Create an API token.** *My Profile → API Tokens → Create Token*, from the
-*Edit zone DNS* template. It needs `Zone:Read` and `DNS:Edit`, and under *Zone
-Resources* pick the one zone. The token is shown once. It can create and delete
-DNS records in that zone and nothing else — no account access, no other domain.
+*Edit zone DNS* template. Under *Permissions* both of these rows have to be
+present:
+
+| | | |
+|---|---|---|
+| Zone | **DNS** | **Edit** |
+| Zone | Zone | Read |
+
+`DNS:Edit` is the one that actually matters and the one most easily left off —
+Caddy writes a temporary `_acme-challenge` TXT record for every issuance and
+renewal. Without it the certificate never arrives and the error blames
+authentication rather than permissions; see
+[Troubleshooting](#troubleshooting).
+
+Under *Zone Resources* pick the one zone. The token is shown once. It can
+create and delete DNS records in that zone and nothing else — no account
+access, no other domain.
 
 **3. Point `.env` at the second Caddyfile:**
 
@@ -197,6 +244,18 @@ same addon id.
 
 Renewal is automatic and needs no open port either. The certificates live in
 the `caddy-data` volume, so restarts and rebuilds keep them.
+
+### Going back to self-signed
+
+Nothing is one-way. Set `CADDYFILE=./Caddyfile` in `.env`, recreate Caddy, and
+the addon is served from `certs/addon.pem` again:
+
+```bash
+docker compose up -d --force-recreate caddy
+```
+
+The other three settings can stay where they are; the self-signed Caddyfile
+never reads them.
 
 ---
 
@@ -634,6 +693,45 @@ a pooled socket for the next request.
 The certificate is not trusted on that machine, or it has no
 `subjectAltName`. See [HTTPS](#https-why-its-required).
 
+**Caddy logs `Code:10000 Message:Authentication error` and never gets a certificate**
+
+Cloudflare rejected the DNS write. The message names authentication, but a
+token with the wrong *permissions* is reported exactly the same way as a token
+that is outright invalid, and the wrong permissions are by far the likelier
+cause. Tell the two apart by asking Cloudflare what the token can read — no
+DNS record is written by this:
+
+```bash
+set -a; . ./.env; set +a
+curl -s -H "Authorization: Bearer $CF_API_TOKEN"   "https://api.cloudflare.com/client/v4/zones?name=$ADDON_DOMAIN" | head -c 200
+```
+
+An empty `"result":[]`, or another 403, means the token itself is not valid
+for this zone. A zone that comes back with its id means the token is fine and
+`DNS:Edit` is what is missing — add it to the token (see
+[step 2](#when-a-client-cannot-be-made-to-trust-it)) and recreate Caddy.
+Editing a token's permissions leaves its value unchanged, so `.env` stays as
+it is. Do not use *Roll*, which issues a different token.
+
+If the token checks out both ways, confirm it actually reached the container —
+an edited `.env` does not reach a container that was never recreated:
+
+```bash
+docker exec stremio-gerbera-caddy sh -c 'echo "${#CF_API_TOKEN}"'
+docker compose up -d --force-recreate caddy
+```
+
+A length of `0` means the variable never arrived: check that the line in
+`.env` is `CF_API_TOKEN=...` with no quotes, no spaces around the `=`, and the
+name written only once.
+
+**A browser shows `SSL_ERROR_INTERNAL_ERROR_ALERT` or a failed handshake on port 7443**
+
+Caddy is running but has no certificate to present, which on the Let's Encrypt
+setup means issuance is still failing — the entry above covers it. The addon
+itself is fine and unrelated; check `docker compose logs caddy` rather than
+the addon's logs.
+
 **The catalog is empty on a Samsung (Tizen) or LG (webOS) TV, but fine elsewhere**
 Almost always the certificate: a TV has no trust store you can add to, and the
 Stremio app on it reports nothing when TLS fails — just an empty catalog. A
@@ -735,6 +833,10 @@ the addon itself and list local episodes only.
   whatever other addons offer, or onto an empty source list.
 - `META_LANG` only reaches TMDB. Cinemeta always answers in English, so a
   non-English setting produces a mix of the two.
+- A TV needs a certificate from a real authority, and that needs a domain and
+  a DNS provider Caddy can write to — Cloudflare here. There is no way around
+  it from the addon's side: the refusal comes from the TV's trust store, which
+  neither Tizen nor webOS lets you add to.
 
 ---
 
