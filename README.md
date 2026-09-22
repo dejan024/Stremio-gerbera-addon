@@ -65,6 +65,20 @@ https://<your-server-ip>:7443/manifest.json
 
 ---
 
+## Updating
+
+```bash
+cd stremio-gerbera-addon
+git pull
+docker compose up -d --build
+```
+
+`--build` is required because the addon image is built from this repository —
+without it Docker keeps running the old code. Your `.env`, `certs/` and
+`cache/` are left untouched.
+
+---
+
 ## HTTPS: why it's required
 
 Stremio refuses to install an addon over plain HTTP unless it is served from
