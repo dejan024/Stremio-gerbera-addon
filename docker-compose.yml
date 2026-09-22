@@ -1,0 +1,31 @@
+services:
+  stremio-gerbera-addon:
+    build: .
+    container_name: stremio-gerbera-addon
+    restart: unless-stopped
+    # Host networking keeps the Gerbera stream URLs (which point at the server's
+    # LAN address) reachable from Stremio clients without extra port mapping.
+    network_mode: host
+    environment:
+      - GERBERA_URL=${GERBERA_URL:-http://127.0.0.1:49494}
+      - PORT=${PORT:-7100}
+      - REFRESH_MINUTES=${REFRESH_MINUTES:-30}
+      - MATCH_IMDB=${MATCH_IMDB:-true}
+      - CACHE_FILE=/app/cache/imdb.json
+    volumes:
+      # Persists resolved IMDb ids across restarts
+      - ./cache:/app/cache
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: stremio-gerbera-caddy
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - HTTPS_PORT=${HTTPS_PORT:-7443}
+      - PORT=${PORT:-7100}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+    depends_on:
+      - stremio-gerbera-addon

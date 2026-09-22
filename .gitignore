@@ -1,0 +1,10 @@
+node_modules/
+npm-debug.log*
+.env
+cache/
+certs/*
+!certs/.gitkeep
+*.pem
+*.key
+.DS_Store
+sessions/

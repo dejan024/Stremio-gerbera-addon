@@ -1,0 +1,3 @@
+# Place addon.pem and addon-key.pem here.
+# See the README for the openssl command that generates them.
+# This directory is kept in git; the certificates themselves are ignored.

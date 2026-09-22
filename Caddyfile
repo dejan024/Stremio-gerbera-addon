@@ -1,0 +1,12 @@
+# TLS terminator in front of the addon.
+# Stremio only accepts addons over HTTPS (except on 127.0.0.1), so a
+# self-signed certificate is required. See the README for how to generate one.
+
+{
+    auto_https off
+}
+
+:{$HTTPS_PORT:7443} {
+    tls /certs/addon.pem /certs/addon-key.pem
+    reverse_proxy 127.0.0.1:{$PORT:7100}
+}

@@ -1,0 +1,37 @@
+{
+  "name": "stremio-gerbera-addon",
+  "version": "2.0.0",
+  "description": "Stremio addon that serves a local Gerbera DLNA/UPnP library as catalogs and as a playable source in Stremio search",
+  "main": "index.js",
+  "type": "commonjs",
+  "license": "MIT",
+  "author": "dejan024 <mangup@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dejan024/Stremio-gerbera-addon.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dejan024/Stremio-gerbera-addon/issues"
+  },
+  "homepage": "https://github.com/dejan024/Stremio-gerbera-addon#readme",
+  "keywords": [
+    "stremio",
+    "stremio-addon",
+    "gerbera",
+    "dlna",
+    "upnp",
+    "media-server",
+    "self-hosted"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "stremio-addon-sdk": "^1.6.10",
+    "axios": "^1.7.7",
+    "fast-xml-parser": "^4.5.0"
+  }
+}
