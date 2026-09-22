@@ -588,11 +588,26 @@ existed. Set `META_ENRICH=false` to skip it entirely.
 | [`library.js`](library.js) | In-memory library state, periodic refresh, metadata pass |
 | [`index.js`](index.js) | Stremio manifest and request handlers |
 
+And what deploys it. There are two of each because the certificate can come
+from two places; `CADDYFILE` in `.env` decides which:
+
+| File | Responsibility |
+|---|---|
+| [`Dockerfile`](Dockerfile) | The addon image |
+| [`caddy.Dockerfile`](caddy.Dockerfile) | Caddy with the Cloudflare DNS module compiled in |
+| [`Caddyfile`](Caddyfile) | TLS from a self-signed certificate in `certs/` |
+| [`Caddyfile.letsencrypt`](Caddyfile.letsencrypt) | TLS from Let's Encrypt, over DNS-01 |
+| [`docker-compose.yml`](docker-compose.yml) | Addon, Caddy and the restart watchdog |
+
 ---
 
 ## Verifying it works
 
-Without touching Stremio:
+Without touching Stremio. `-k` skips certificate verification, which is what
+makes these work against `localhost` whichever certificate is in use — on the
+Let's Encrypt setup the name does not match, and on the self-signed one it is
+not trusted. To check the certificate itself rather than the addon behind it,
+drop the `k` and use the real name: `curl -s https://gerbera.example.org:7443/manifest.json`.
 
 ```bash
 curl -sk https://localhost:7443/manifest.json
