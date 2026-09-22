@@ -1,7 +1,7 @@
 {
   "name": "stremio-gerbera-addon",
-  "version": "2.0.0",
-  "description": "Stremio addon that serves a local Gerbera DLNA/UPnP library as catalogs and as a playable source in Stremio search",
+  "version": "2.1.0",
+  "description": "Stremio addon that serves a local Gerbera DLNA/UPnP library as catalogs and as a playable source in Stremio search, with posters and descriptions from Cinemeta and TMDB",
   "main": "index.js",
   "type": "commonjs",
   "license": "MIT",
@@ -21,7 +21,9 @@
     "dlna",
     "upnp",
     "media-server",
-    "self-hosted"
+    "self-hosted",
+    "metadata",
+    "tmdb"
   ],
   "engines": {
     "node": ">=18"
@@ -30,8 +32,9 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "stremio-addon-sdk": "^1.6.10",
     "axios": "^1.7.7",
-    "fast-xml-parser": "^4.5.0"
+    "fast-xml-parser": "^4.5.0",
+    "parse-torrent-title": "^3.0.1",
+    "stremio-addon-sdk": "^1.6.10"
   }
 }

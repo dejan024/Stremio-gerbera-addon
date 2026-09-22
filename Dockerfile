@@ -7,12 +7,14 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
-COPY index.js gerbera.js parse.js cinemeta.js library.js ./
+COPY index.js gerbera.js parse.js cinemeta.js tmdb.js meta.js cache.js library.js ./
 
-# Cache of resolved IMDb ids; mount a volume here so it survives restarts.
+# Resolved IMDb ids and metadata records; mount a volume here so they survive
+# restarts, otherwise the whole library is looked up again on every start.
 RUN mkdir -p /app/cache
 ENV PORT=7100
 ENV CACHE_FILE=/app/cache/imdb.json
+ENV META_CACHE_FILE=/app/cache/meta.json
 EXPOSE 7100
 
 # Marks the container unhealthy when /health reports a fault a restart can

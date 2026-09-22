@@ -7,14 +7,24 @@
 //   - series, with their episodes grouped by show name
 //   - an index by IMDb id, so the stream handler can answer when Stremio asks
 //     about a title found through its regular search
+//
+// Once that skeleton exists, a background pass hangs real metadata off it —
+// poster, description, genres, rating, episode names — so the catalog shows
+// cards rather than filenames. That pass never blocks a request: the library
+// is served the moment the file list is in, and the cards fill in behind it.
 
 const { getAllVideos } = require('./gerbera');
 const { parseTitle, normalize } = require('./parse');
 const cinemeta = require('./cinemeta');
+const meta = require('./meta');
 
 const GERBERA_URL = process.env.GERBERA_URL || 'http://127.0.0.1:49494';
 const REFRESH_MINUTES = Number(process.env.REFRESH_MINUTES || 30);
 const MATCH_IMDB = String(process.env.MATCH_IMDB || 'true') !== 'false';
+// Concurrent provider lookups during the enrichment pass. Four is gentle
+// enough for Cinemeta and well inside TMDB's rate limit, and the work is all
+// waiting on the network anyway.
+const LOOKUP_CONCURRENCY = Number(process.env.LOOKUP_CONCURRENCY || 4);
 // A scan still running after this long is treated as hung — the one failure a
 // container restart can actually clear. See health() below.
 const SCAN_TIMEOUT_MINUTES = Number(process.env.SCAN_TIMEOUT_MINUTES || 10);
@@ -24,11 +34,13 @@ const state = {
   scannedAt: 0,
   scanStartedAt: 0,    // 0 when no scan is in flight
   error: null,
-  movies: [],          // { id, kind, title, year, video }
+  movies: [],          // { id, kind, title, year, video, imdbId?, meta? }
   others: [],
-  series: [],          // { id, title, slug, episodes: [{ season, episode, title, video }] }
+  series: [],          // { id, title, slug, episodes: [...], imdbId?, meta? }
   byId: new Map(),     // 'gerbera:...' -> entry used by the meta/stream handlers
   byImdb: new Map(),   // 'tt0086567' or 'tt9077540:2:1' -> [ video, ... ]
+  enriched: 0,         // titles that came back with real metadata
+  enriching: false,    // the background pass is still running
 };
 
 function slugify(title) {
@@ -64,6 +76,9 @@ function buildEntries(videos) {
         season: parsed.season,
         episode: parsed.episode,
         title: parsed.title,
+        // The name the filename gives this episode, if it gives one. Used
+        // only where a provider has nothing better.
+        episodeTitle: parsed.episodeTitle || null,
         video,
       });
       continue;
@@ -104,36 +119,96 @@ function buildIndex({ movies, others, series }) {
 }
 
 /**
- * Resolves local titles to IMDb ids through Cinemeta search.
- * Runs in the background — the catalog is usable before this finishes.
+ * Hangs real metadata off the entries and resolves them to IMDb ids.
+ *
+ * The two jobs are done together because they share their expensive half: a
+ * metadata record carries the IMDb id it was found under, so asking for the
+ * record answers both questions in one round trip. When enrichment is turned
+ * off, or when it finds nothing, the id is still looked up on its own — the
+ * "local file as a source in Stremio search" feature does not depend on
+ * having a poster.
+ *
+ * Runs in the background: the catalog is usable before this finishes, and
+ * every step of it may fail without taking the library down with it.
  */
-async function resolveImdb({ movies, series }) {
-  if (!MATCH_IMDB || !cinemeta.isEnabled()) return new Map();
-
+async function enrichAndIndex({ movies, series }) {
   const byImdb = new Map();
   const push = (key, video) => {
     if (!byImdb.has(key)) byImdb.set(key, []);
     byImdb.get(key).push(video);
   };
 
-  await cinemeta.mapLimited(movies, 4, async entry => {
-    const id = await cinemeta.findImdbId('movie', entry.title, entry.year);
-    if (id) {
-      entry.imdbId = id;
-      push(id, entry.video);
+  const wantImdb = MATCH_IMDB && cinemeta.isEnabled();
+  const wantMeta = meta.isEnabled();
+  if (!wantImdb && !wantMeta) return { byImdb, enriched: 0 };
+
+  let enriched = 0;
+
+  await cinemeta.mapLimited(movies, LOOKUP_CONCURRENCY, async entry => {
+    let imdbId = null;
+    try {
+      if (wantMeta) {
+        const record = await meta.enrich({
+          kind: 'movie',
+          title: entry.title,
+          year: entry.year,
+        });
+        if (record) {
+          entry.meta = record;
+          imdbId = record.imdbId;
+          enriched++;
+        }
+      }
+      // Either enrichment is off, or it found nothing, or the provider that
+      // answered had no IMDb id to give.
+      if (!imdbId && wantImdb) {
+        imdbId = await cinemeta.findImdbId('movie', entry.title, entry.year);
+      }
+    } catch (err) {
+      console.warn(`Metadata lookup failed for "${entry.title}": ${err.message}`);
+    }
+
+    if (imdbId && wantImdb) {
+      entry.imdbId = imdbId;
+      push(imdbId, entry.video);
     }
   });
 
-  await cinemeta.mapLimited(series, 4, async s => {
-    const id = await cinemeta.findImdbId('series', s.title, null);
-    if (!id) return;
-    s.imdbId = id;
-    for (const ep of s.episodes) {
-      push(`${id}:${ep.season}:${ep.episode}`, ep.video);
+  await cinemeta.mapLimited(series, LOOKUP_CONCURRENCY, async show => {
+    let imdbId = null;
+    try {
+      if (wantMeta) {
+        const record = await meta.enrich({
+          kind: 'series',
+          title: show.title,
+          year: show.year,
+          // Only the seasons actually on the server are worth fetching
+          // episode details for.
+          seasons: [...new Set(show.episodes.map(ep => ep.season))].sort((a, b) => a - b),
+        });
+        if (record) {
+          show.meta = record;
+          imdbId = record.imdbId;
+          enriched++;
+        }
+      }
+      if (!imdbId && wantImdb) {
+        imdbId = await cinemeta.findImdbId('series', show.title, show.year);
+      }
+    } catch (err) {
+      console.warn(`Metadata lookup failed for "${show.title}": ${err.message}`);
+    }
+
+    if (imdbId && wantImdb) {
+      show.imdbId = imdbId;
+      for (const ep of show.episodes) {
+        push(`${imdbId}:${ep.season}:${ep.episode}`, ep.video);
+      }
     }
   });
 
-  return byImdb;
+  meta.flush();
+  return { byImdb, enriched };
 }
 
 async function scan() {
@@ -158,13 +233,19 @@ async function scan() {
     `${entries.others.length} other clips.`
   );
 
-  // IMDb matching runs afterwards so the catalog never waits on the internet.
-  resolveImdb(entries)
-    .then(byImdb => {
+  // Metadata lookups run afterwards so the catalog never waits on the internet.
+  state.enriching = true;
+  enrichAndIndex(entries)
+    .then(({ byImdb, enriched }) => {
       state.byImdb = byImdb;
-      if (byImdb.size) console.log(`Matched ${byImdb.size} titles to an IMDb id.`);
+      state.enriched = enriched;
+      console.log(
+        `Metadata: ${enriched} titles enriched, ` +
+        `${byImdb.size} matched to an IMDb id (${JSON.stringify(meta.stats())}).`
+      );
     })
-    .catch(err => console.warn('IMDb matching failed:', err.message));
+    .catch(err => console.warn('Metadata pass failed:', err.message))
+    .finally(() => { state.enriching = false; });
 }
 
 let scanning = null;
@@ -228,6 +309,8 @@ function health() {
       episodes: state.series.reduce((n, s) => n + s.episodes.length, 0),
       others: state.others.length,
       imdbMatches: state.byImdb.size,
+      enriched: state.enriched,
+      enriching: state.enriching,
     },
   };
 }

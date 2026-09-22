@@ -12,9 +12,19 @@ services:
       - REFRESH_MINUTES=${REFRESH_MINUTES:-30}
       - MATCH_IMDB=${MATCH_IMDB:-true}
       - SCAN_TIMEOUT_MINUTES=${SCAN_TIMEOUT_MINUTES:-10}
+      - META_ENRICH=${META_ENRICH:-true}
+      - TMDB_API_KEY=${TMDB_API_KEY:-}
+      - META_LANG=${META_LANG:-en}
+      - META_TTL_DAYS=${META_TTL_DAYS:-30}
+      - META_MISS_TTL_DAYS=${META_MISS_TTL_DAYS:-3}
+      - IMDB_TTL_DAYS=${IMDB_TTL_DAYS:-180}
+      - LOOKUP_CONCURRENCY=${LOOKUP_CONCURRENCY:-4}
       - CACHE_FILE=/app/cache/imdb.json
+      - META_CACHE_FILE=/app/cache/meta.json
     volumes:
-      # Persists resolved IMDb ids across restarts
+      # Persists resolved IMDb ids and metadata records across restarts. Worth
+      # keeping: without it, every restart re-fetches the whole library's
+      # metadata from the providers.
       - ./cache:/app/cache
     # The healthcheck itself lives in the Dockerfile. This label is what lets
     # the autoheal container below restart this one when it turns unhealthy.

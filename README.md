@@ -4,7 +4,7 @@ A [Stremio](https://www.stremio.com/) addon that turns a local
 [Gerbera](https://gerbera.io/) DLNA/UPnP media server into a first-class
 source inside Stremio.
 
-It does two things:
+It does three things:
 
 1. **Catalogs** — your movies, series and other clips from the Gerbera server,
    browsable straight from Stremio.
@@ -12,6 +12,11 @@ It does two things:
    its normal search, the addon checks whether that exact title sits on your
    Gerbera server and, if it does, offers it in the source list as
    **Gerbera → Local network**.
+3. **Real metadata** — filenames are matched against
+   [Cinemeta](https://v3-cinemeta.strem.io) and, optionally,
+   [TMDB](https://www.themoviedb.org/), so the catalog shows posters,
+   descriptions, genres, ratings and episode names instead of
+   `Some.Movie.2019.1080p.WEBRip.x264.mkv`.
 
 Playback uses the direct HTTP URL that Gerbera already serves to DLNA clients.
 Nothing is transcoded, nothing leaves your network, and because Gerbera
@@ -139,10 +144,94 @@ Everything is configured through environment variables. Copy `.env.example` to
 | `REFRESH_MINUTES` | `30` | How often the library is rescanned |
 | `MATCH_IMDB` | `true` | Resolve local titles to IMDb ids via Cinemeta |
 | `SCAN_TIMEOUT_MINUTES` | `10` | A scan running longer than this marks the addon unhealthy |
+| `META_ENRICH` | `true` | Fetch posters, descriptions, genres, ratings and episode names |
+| `TMDB_API_KEY` | *(empty)* | Optional second metadata provider — see below |
+| `META_LANG` | `en` | Language for TMDB descriptions (`sr-RS`, `de-DE`, …) |
+| `META_TTL_DAYS` | `30` | How long a metadata record is kept before refetching |
+| `META_MISS_TTL_DAYS` | `3` | How long a title no provider knew is remembered as a miss |
+| `IMDB_TTL_DAYS` | `180` | How long a resolved IMDb id is kept |
+| `LOOKUP_CONCURRENCY` | `4` | Concurrent provider lookups during the metadata pass |
 | `CACHE_FILE` | `/app/cache/imdb.json` | Where resolved IMDb ids are cached |
+| `META_CACHE_FILE` | `/app/cache/meta.json` | Where metadata records are cached |
 
 `GERBERA_URL` must be the UPnP port, which is the same port that serves the
 Gerbera web UI — check `http://<host>:<port>/description.xml` returns XML.
+
+---
+
+## Metadata
+
+Out of the box the addon uses **Cinemeta**, the public metadata addon Stremio
+itself runs on. It needs no key, no account and no configuration, and it
+covers anything with an IMDb id — which is most of a typical library.
+
+A title it recognises is published in the catalog under its **IMDb id**, so
+opening that card lands on the same detail page Stremio shows for the film
+everywhere else — artwork, cast, trailer — with your local file listed as a
+source next to whatever other addons offer. A title it does not recognise
+keeps an id of the addon's own, and the addon draws that page itself from
+whatever it managed to find, falling back to the parsed filename.
+
+### Adding a TMDB key (optional)
+
+TMDB is the second opinion for what Cinemeta does not have: regional and
+older titles, films released under a local name, and anything whose filename
+spells the title differently from the official English one. It also carries
+descriptions in other languages.
+
+1. Create a free account at [themoviedb.org](https://www.themoviedb.org/signup).
+2. Request an API key under **Settings → API** (choose *Developer*; approval
+   is immediate).
+3. Copy the **API Key (v3 auth)** — a 32-character hex string, *not* the
+   longer "Read Access Token".
+4. Put it in your `.env` next to the other settings:
+
+   ```ini
+   TMDB_API_KEY=0123456789abcdef0123456789abcdef
+   ```
+
+5. Recreate the container so it picks the value up:
+
+   ```bash
+   docker compose up -d
+   ```
+
+Nothing else changes. Without a key the addon never contacts TMDB and runs on
+Cinemeta alone; if the key is wrong, the first rejected request switches TMDB
+off for that run and logs why, and the addon carries on.
+
+> **About `META_LANG`.** It applies to TMDB only — Cinemeta has no language
+> parameter and always answers in English. Because Cinemeta is asked first,
+> setting `META_LANG=sr-RS` gives you a mix: English for everything Cinemeta
+> recognised, Serbian only for the titles that fell through to TMDB.
+
+### How the cache works
+
+Every lookup is a network round trip, and the answers barely change, so both
+are written to disk under the `./cache` volume:
+
+| File | Holds | Lifetime |
+|---|---|---|
+| `cache/imdb.json` | filename → IMDb id | `IMDB_TTL_DAYS` (180 days) |
+| `cache/meta.json` | IMDb/TMDB id → poster, description, genres, episodes | `META_TTL_DAYS` (30 days) |
+
+Three things are worth knowing about it:
+
+- **Misses are cached too**, for the shorter `META_MISS_TTL_DAYS`. A title no
+  provider recognises is not looked up again on every rescan, but it *is*
+  retried after a few days, because metadata databases keep growing.
+- **Only new or expired entries cost a request.** A rescan of a library that
+  has not changed makes no provider calls at all. Adding one film costs one
+  or two requests, not a full re-fetch.
+- **The first scan after enabling this is the slow one.** Every title is a
+  fresh lookup. It runs in the background — the catalog is served immediately
+  and the cards fill in behind it — but on a library of a few thousand files
+  expect a few minutes before everything has artwork. Watch it finish with
+  `curl -sk https://<host>:7443/health | grep -E 'enrich'`.
+
+Deleting `cache/meta.json` forces a full re-fetch; the addon recreates it.
+Keeping the `./cache` volume mounted is what stops that happening on every
+container restart.
 
 ---
 
@@ -284,9 +373,16 @@ This is what makes a local file show up as a source under a title you found
 through normal Stremio search.
 
 1. [`parse.js`](parse.js) splits the raw filename into a title, a year and —
-   for series — a season and episode number. It distinguishes scene releases
-   (`1080p`, `x264`, `YIFY`, …) from music videos and home recordings, so the
-   latter do not pollute the movie catalog.
+   for series — a season, an episode number and, when the filename carries
+   one, the episode's name. Two parsers run over every name: the rules in
+   that file decide *what kind* of file it is, because telling a scene release
+   (`1080p`, `x264`, `YIFY`, …) from a music video or a home recording depends
+   on the shape of a home library and no general-purpose library does it;
+   [`parse-torrent-title`](https://www.npmjs.com/package/parse-torrent-title)
+   then runs over the same name to sharpen the title and year. Where the two
+   disagree the shorter title wins — whatever the other kept is a site tag or
+   a release group — except when one of them cut the title at a number that
+   belongs to it, as in *Blade Runner 2049*.
 2. [`cinemeta.js`](cinemeta.js) asks [Cinemeta](https://v3-cinemeta.strem.io)
    — the public Stremio metadata addon — for the IMDb id matching that title
    and year. A hit is accepted only when the normalized titles match exactly
@@ -304,14 +400,53 @@ Without internet access this whole layer fails quietly: the catalogs keep
 working, only the search-integration part is skipped. It can also be turned
 off deliberately with `MATCH_IMDB=false`.
 
+### Filling in the metadata
+
+The same background pass that resolves IMDb ids also fetches the metadata,
+because the two share their expensive half — a metadata record carries the
+IMDb id it was found under, so one request answers both questions.
+
+For each title [`meta.js`](meta.js) works down a chain, stopping at the first
+answer:
+
+1. **Cinemeta by id**, when the id is already known. One request, no
+   searching. This is the common case.
+2. **Cinemeta search** on the parsed title. Worth trying even after step 1
+   failed, since the parser may have cleaned the name up differently from the
+   pass that resolved the id.
+3. **TMDB**, if a key is configured: title + year, then the title without the
+   year (a filename's year is often the encode's, not the film's), then the
+   title cut at a subtitle. A result is only accepted when its name — or its
+   original-language name, which is usually what a local filename carries —
+   matches exactly; TMDB ranks by popularity, so the top hit for a short title
+   is frequently the wrong film.
+4. **Nothing.** The entry keeps its parsed name and the Gerbera thumbnail,
+   and the miss is cached so the next scan does not repeat the search.
+
+Episode names come from the provider where it has them, and otherwise from
+the filename — a show no database carries is usually named
+`Serija.S01E04.Dolazak.Kuci.HDTV.avi`, and that is the difference between a
+readable episode list and a column of `S01E04`.
+
+For series, only the seasons actually present on the server are fetched from
+TMDB: a twelve-season show with two seasons on disk costs two requests.
+
+Every step of this is allowed to fail on its own. A provider that is down, a
+rejected API key, no internet at all — each one degrades the cards, never the
+addon: worst case you get exactly what the addon showed before this layer
+existed. Set `META_ENRICH=false` to skip it entirely.
+
 ### Project layout
 
 | File | Responsibility |
 |---|---|
 | [`gerbera.js`](gerbera.js) | UPnP/SOAP client, deduplication |
-| [`parse.js`](parse.js) | Filename → title, year, season, episode |
-| [`cinemeta.js`](cinemeta.js) | IMDb id lookups, on-disk cache |
-| [`library.js`](library.js) | In-memory library state, periodic refresh |
+| [`parse.js`](parse.js) | Filename → title, year, season, episode, episode name |
+| [`cinemeta.js`](cinemeta.js) | IMDb id lookups and full records from Cinemeta |
+| [`tmdb.js`](tmdb.js) | TMDB provider — optional, key-gated |
+| [`meta.js`](meta.js) | Provider chain, fallbacks, one record shape |
+| [`cache.js`](cache.js) | On-disk key/value store with TTLs and negative caching |
+| [`library.js`](library.js) | In-memory library state, periodic refresh, metadata pass |
 | [`index.js`](index.js) | Stremio manifest and request handlers |
 
 ---
@@ -339,13 +474,33 @@ curl -sk https://localhost:7443/stream/movie/tt0086567.json
 The last call should return a local source if that film is in your library.
 Substitute an IMDb id you actually have.
 
+To check that the metadata layer is doing its job, look for `poster`,
+`genres` and `imdbRating` in the catalog, and for entries whose `id` is an
+IMDb id rather than a `gerbera:` one:
+
+```bash
+curl -sk https://localhost:7443/catalog/movie/gerbera-movies.json | grep -o '"id":"[^"]*"' | sort | uniq -c
+```
+
+A recognised series page — episode names, thumbnails and air dates — is
+whatever Cinemeta serves for its IMDb id. For a series the providers do *not*
+know, the addon draws the page itself; that is the one to check:
+
+```bash
+curl -sk "https://localhost:7443/meta/series/gerbera:series:<slug>.json"
+```
+
 Startup logs should look like this:
 
 ```
 Scanning Gerbera server: http://192.168.1.10:49494
 Done in 2110ms: 301 files -> 14 movies, 1 series (10 episodes), 277 other clips.
-Matched 19 titles to an IMDb id.
+Metadata: 15 titles enriched, 19 matched to an IMDb id ({"hits":0,"cinemeta":15,"tmdb":0,"misses":6,"cached":21}).
 ```
+
+`cinemeta` and `tmdb` count fresh lookups, `hits` come from the cache, and
+`misses` are titles no provider recognised. On the second start the same
+library should log mostly `hits` and no provider calls at all.
 
 ---
 
@@ -418,8 +573,15 @@ other clips.
   a tunnel, like any other self-hosted service.
 - There is no transcoding. Playback depends on the Stremio client supporting
   the container and codec of the file.
-- Metadata for catalog entries comes from the filenames and Gerbera
-  thumbnails, not from an online database.
+- A card is only as good as the filename behind it. A file the providers
+  cannot be matched to falls back to its parsed name and the Gerbera
+  thumbnail; renaming it closer to `Title (Year).ext` usually fixes that on
+  the next rescan.
+- Opening a recognised series lands on the provider's page, which lists every
+  episode of the show — including the ones you do not have. Those open onto
+  whatever other addons offer, or onto an empty source list.
+- `META_LANG` only reaches TMDB. Cinemeta always answers in English, so a
+  non-English setting produces a mix of the two.
 
 ---
 

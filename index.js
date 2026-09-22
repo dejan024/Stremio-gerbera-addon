@@ -7,6 +7,13 @@
 //   2. Local source — when any movie or episode is opened in Stremio (through
 //      its regular search), the addon checks whether that title exists on the
 //      Gerbera server and, if so, offers it as a playable source.
+//
+// Catalog entries carry an IMDb id whenever the title was recognised, so
+// opening one lands on the same detail page Stremio shows for that film
+// everywhere else — artwork, cast, trailer, and every other addon's streams
+// listed next to the local file. A file that could not be recognised keeps an
+// id of this addon's own and is described from whatever the metadata pass
+// managed to find, falling back to the filename.
 
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
 const { state, ensureFresh, health, describe, GERBERA_URL } = require('./library');
@@ -17,7 +24,7 @@ const ADDON_PORT = Number(process.env.PORT || 7100);
 
 const manifest = {
   id: 'org.gerbera.dlna.addon',
-  version: '2.0.0',
+  version: '2.1.0',
   name: 'Gerbera Local DLNA',
   description: 'Movies, series and clips from a local Gerbera DLNA/UPnP server — ' +
     'as a catalog, and as a playable source inside Stremio search.',
@@ -61,29 +68,118 @@ function matches(title, search) {
   return normalize(title).includes(normalize(search));
 }
 
+const pad2 = n => String(n).padStart(2, '0');
+
+/**
+ * The id a catalog entry is published under.
+ *
+ * A recognised title is published as its IMDb id, which is what makes Stremio
+ * open the standard detail page for it instead of a page this addon would
+ * have to draw itself. Everything else keeps its `gerbera:` id, and the meta
+ * handler below answers for those.
+ */
+const publicId = entry => entry.imdbId || entry.id;
+
+/**
+ * Keeps the technical detail of the local file visible underneath the
+ * synopsis. It is the one thing no metadata provider can tell you and the
+ * main reason to care that the file is on your own server.
+ *
+ * A TMDB score goes here too rather than into `imdbRating`: it is a different
+ * number from a different audience, and Stremio would label it as IMDb's.
+ */
+function composeDescription(record, tech) {
+  const parts = [];
+  if (record && record.description) parts.push(record.description);
+  if (record && !record.imdbRating && record.tmdbRating) {
+    parts.push(`TMDB ${record.tmdbRating}/10`);
+  }
+  if (tech) parts.push(`On the local server: ${tech}`);
+  return parts.length ? parts.join('\n\n') : undefined;
+}
+
 function movieMeta(entry) {
+  const m = entry.meta;
+  // A provider poster is artwork in portrait; a Gerbera thumbnail is a frame
+  // grabbed from the video, which only looks right in landscape.
+  const poster = (m && m.poster) || entry.video.thumb || undefined;
+
   return {
-    id: entry.id,
+    id: publicId(entry),
     type: 'movie',
-    name: entry.year ? `${entry.title} (${entry.year})` : entry.title,
-    poster: entry.video.thumb || undefined,
-    posterShape: 'landscape',
-    background: entry.video.thumb || undefined,
-    description: describe(entry.video),
-    releaseInfo: entry.year ? String(entry.year) : undefined,
+    name: (m && m.name) || (entry.year ? `${entry.title} (${entry.year})` : entry.title),
+    poster,
+    posterShape: m && m.poster ? 'poster' : 'landscape',
+    background: (m && m.background) || entry.video.thumb || undefined,
+    logo: (m && m.logo) || undefined,
+    description: composeDescription(m, describe(entry.video)),
+    releaseInfo: (m && m.releaseInfo) || (entry.year ? String(entry.year) : undefined),
+    genres: m && m.genres.length ? m.genres : undefined,
+    imdbRating: (m && m.imdbRating) || undefined,
+    runtime: (m && m.runtime) || undefined,
+    cast: m && m.cast.length ? m.cast : undefined,
+    director: m && m.director.length ? m.director : undefined,
+    country: (m && m.country) || undefined,
   };
 }
 
 function seriesMeta(s) {
+  const m = s.meta;
   const withThumb = s.episodes.find(e => e.video.thumb);
+  const local = `${s.episodes.length} episodes on the local server`;
+
   return {
-    id: s.id,
+    id: publicId(s),
     type: 'series',
-    name: s.title,
-    poster: (withThumb && withThumb.video.thumb) || undefined,
-    posterShape: 'landscape',
-    description: `${s.episodes.length} episodes on the local server`,
+    name: (m && m.name) || s.title,
+    poster: (m && m.poster) || (withThumb && withThumb.video.thumb) || undefined,
+    posterShape: m && m.poster ? 'poster' : 'landscape',
+    background: (m && m.background) || undefined,
+    logo: (m && m.logo) || undefined,
+    description: composeDescription(m, local),
+    releaseInfo: (m && m.releaseInfo) || undefined,
+    genres: m && m.genres.length ? m.genres : undefined,
+    imdbRating: (m && m.imdbRating) || undefined,
+    cast: m && m.cast.length ? m.cast : undefined,
+    country: (m && m.country) || undefined,
   };
+}
+
+/**
+ * One episode of a series this addon draws the page for itself.
+ *
+ * The episode's name comes from the provider when it has one, and otherwise
+ * from the filename — plenty of shows on a home server are in no provider's
+ * database, and their files are usually named "...S01E04.Dolazak.Kuci...".
+ */
+function episodeVideo(show, ep) {
+  const info = show.meta && show.meta.episodes[`${ep.season}:${ep.episode}`];
+  const code = `S${pad2(ep.season)}E${pad2(ep.episode)}`;
+  const name = (info && info.title) || ep.episodeTitle;
+
+  return {
+    id: `${show.id}:${ep.season}:${ep.episode}`,
+    title: name ? `${code} · ${name}` : code,
+    season: ep.season,
+    episode: ep.episode,
+    overview: (info && info.description) || undefined,
+    thumbnail: (info && info.thumbnail) || ep.video.thumb || undefined,
+    released: (info && info.released) || undefined,
+  };
+}
+
+/**
+ * Two copies of the same film on the server resolve to the same IMDb id and
+ * would otherwise appear as two identical cards. Both copies stay available:
+ * the stream handler indexes files, not cards, and lists every one it has.
+ */
+function dedupe(metas) {
+  const seen = new Set();
+  return metas.filter(m => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
 }
 
 /**
@@ -121,7 +217,7 @@ builder.defineCatalogHandler(async ({ type, id, extra }) => {
     return { metas: [] };
   }
 
-  return { metas: metas.slice(skip, skip + PAGE_SIZE) };
+  return { metas: dedupe(metas).slice(skip, skip + PAGE_SIZE) };
 });
 
 builder.defineMetaHandler(async ({ type, id }) => {
@@ -132,13 +228,10 @@ builder.defineMetaHandler(async ({ type, id }) => {
 
   if (type === 'series' && entry.episodes) {
     const meta = seriesMeta(entry);
-    meta.videos = entry.episodes.map(ep => ({
-      id: `${entry.id}:${ep.season}:${ep.episode}`,
-      title: `S${String(ep.season).padStart(2, '0')}E${String(ep.episode).padStart(2, '0')}`,
-      season: ep.season,
-      episode: ep.episode,
-      thumbnail: ep.video.thumb || undefined,
-    }));
+    // Only the episodes actually on the server are listed. Stremio would
+    // happily render every episode the provider knows about, but each of the
+    // missing ones would open onto an empty source list.
+    meta.videos = entry.episodes.map(ep => episodeVideo(entry, ep));
     return { meta };
   }
 
