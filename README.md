@@ -138,10 +138,90 @@ Everything is configured through environment variables. Copy `.env.example` to
 | `HTTPS_PORT` | `7443` | Port Caddy serves HTTPS on |
 | `REFRESH_MINUTES` | `30` | How often the library is rescanned |
 | `MATCH_IMDB` | `true` | Resolve local titles to IMDb ids via Cinemeta |
+| `SCAN_TIMEOUT_MINUTES` | `10` | A scan running longer than this marks the addon unhealthy |
 | `CACHE_FILE` | `/app/cache/imdb.json` | Where resolved IMDb ids are cached |
 
 `GERBERA_URL` must be the UPnP port, which is the same port that serves the
 Gerbera web UI — check `http://<host>:<port>/description.xml` returns XML.
+
+---
+
+## Health checks and automatic restart
+
+The addon serves a plain JSON report at `/health`:
+
+```bash
+curl -s http://localhost:7100/health
+```
+
+```json
+{
+  "status": "ok",
+  "healthy": true,
+  "gerbera": "http://192.168.1.10:49494",
+  "error": null,
+  "lastScan": "2026-03-04T09:12:44.118Z",
+  "lastScanAgeSeconds": 96,
+  "scanningForSeconds": null,
+  "uptimeSeconds": 3711,
+  "library": {
+    "movies": 14, "series": 1, "episodes": 10, "others": 277, "imdbMatches": 19
+  }
+}
+```
+
+| `status` | HTTP | Meaning |
+|---|---|---|
+| `starting` | 200 | The first scan has not finished yet |
+| `ok` | 200 | Library loaded, last scan succeeded |
+| `degraded` | 200 | The last scan failed — the reason is in `error` |
+| `hung` | 503 | A scan has been running for over `SCAN_TIMEOUT_MINUTES` |
+
+Only `hung` counts as unhealthy, and that is deliberate. Restarting the addon
+cannot bring back an unreachable Gerbera server, so `degraded` stays healthy:
+the addon keeps serving the library from its last successful scan, and the
+catalog tile carries the reason. A container that restarted every minute for
+as long as the media server was switched off would be worse than one that
+simply says what is wrong. A scan that starts and never returns is the
+opposite case — every request then waits on it forever, and only a restart
+clears that.
+
+### What restarts what
+
+`restart: unless-stopped` covers a container that crashed or exited. It does
+**not** cover one that stays up while reporting unhealthy: the Docker engine
+records the healthcheck result and acts on nothing. Three pieces close that
+gap:
+
+| Piece | Where | What it does |
+|---|---|---|
+| `HEALTHCHECK` | [`Dockerfile`](Dockerfile) | Polls `/health` on the addon every 60s |
+| `healthcheck:` | [`docker-compose.yml`](docker-compose.yml) | Polls Caddy's admin API on `127.0.0.1:2019` |
+| `autoheal` | [`docker-compose.yml`](docker-compose.yml) | Restarts any container labelled `autoheal=true` once its healthcheck fails |
+
+Caddy is probed through its own admin API rather than through the port it
+proxies, so the addon being down — a 502 from the TLS port — does not get
+Caddy restarted for someone else's fault. The `admin 127.0.0.1:2019` line in
+the [`Caddyfile`](Caddyfile) is what this relies on; with `network_mode: host`
+that port is taken on the host, so a second Caddy cannot run alongside it.
+
+Where things stand:
+
+```bash
+docker compose ps
+```
+
+```bash
+docker inspect --format '{{json .State.Health}}' stremio-gerbera-addon
+```
+
+### Running without the watchdog
+
+`autoheal` restarts containers through the Docker socket, which is effectively
+root on the host. If you would rather not grant that, delete the `autoheal`
+service and the two `labels:` blocks from `docker-compose.yml`. The
+healthchecks stay in place and `docker compose ps` keeps reporting
+`healthy` / `unhealthy` — nothing acts on it on its own.
 
 ---
 
@@ -174,6 +254,11 @@ Restart=on-failure
 [Install]
 WantedBy=multi-user.target
 ```
+
+`Restart=on-failure` covers a crash, but nothing polls `/health` here — a
+systemd install has no equivalent of the container watchdog below. A timer
+running `curl -sf http://127.0.0.1:7100/health || systemctl restart
+stremio-gerbera-addon` is the usual substitute.
 
 ---
 
@@ -240,6 +325,10 @@ curl -sk https://localhost:7443/manifest.json
 ```
 
 ```bash
+curl -sk https://localhost:7443/health
+```
+
+```bash
 curl -sk https://localhost:7443/catalog/movie/gerbera-movies.json
 ```
 
@@ -270,6 +359,19 @@ The library could not be read; the tile carries the reason. Check the logs
 ```bash
 docker exec stremio-gerbera-addon wget -qO- "$GERBERA_URL/description.xml" | head
 ```
+
+**A container shows `unhealthy`, or keeps being restarted**
+Read the report first — it names the fault:
+
+```bash
+docker exec stremio-gerbera-addon wget -qO- http://127.0.0.1:7100/health
+```
+
+`status: hung` means a library scan never returned, which is what the
+restart is for. If it recurs, the Gerbera server is most likely accepting
+connections but not answering; raising `SCAN_TIMEOUT_MINUTES` only makes the
+addon wait longer. A `degraded` status never triggers a restart, so if the
+container is restarting the cause is elsewhere — check the logs.
 
 **`Entity expansion limit exceeded` in the logs**
 A ContentDirectory response carries its DIDL-Lite payload inside `<Result>` as

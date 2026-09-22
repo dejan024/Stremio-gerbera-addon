@@ -4,6 +4,10 @@
 
 {
     auto_https off
+
+    # Local admin API. The container healthcheck polls it to tell "Caddy is
+    # wedged" (restart it) apart from "the addon behind it is down" (do not).
+    admin 127.0.0.1:2019
 }
 
 :{$HTTPS_PORT:7443} {

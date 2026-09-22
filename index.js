@@ -9,7 +9,7 @@
 //      Gerbera server and, if so, offers it as a playable source.
 
 const { addonBuilder, serveHTTP } = require('stremio-addon-sdk');
-const { state, ensureFresh, describe, GERBERA_URL } = require('./library');
+const { state, ensureFresh, health, describe, GERBERA_URL } = require('./library');
 const cinemeta = require('./cinemeta');
 const { normalize } = require('./parse');
 
@@ -212,5 +212,40 @@ builder.defineStreamHandler(async ({ type, id }) => {
 // Scan once at startup so the first request does not have to wait.
 ensureFresh().catch(err => console.error('Initial scan failed:', err.message));
 
-serveHTTP(builder.getInterface(), { port: ADDON_PORT });
-console.log(`Addon listening on http://0.0.0.0:${ADDON_PORT}/manifest.json  (Gerbera: ${GERBERA_URL})`);
+/**
+ * Serves `GET /health` next to the addon's own routes.
+ *
+ * The SDK builds its express app inside serveHTTP and offers no hook for extra
+ * routes, so that app is taken off the server and kept as the fallthrough for
+ * everything that is not the health probe.
+ */
+function mountHealth(server) {
+  const [addon] = server.listeners('request');
+  if (!addon) {
+    console.warn('Could not mount /health: no request handler on the server.');
+    return;
+  }
+
+  server.removeAllListeners('request');
+  server.on('request', (req, res) => {
+    if (req.url.split('?')[0] !== '/health') return addon(req, res);
+
+    // Read-only on purpose: a probe reports state, it does not trigger a scan.
+    const report = health();
+    res.writeHead(report.healthy ? 200 : 503, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Cache-Control': 'no-store',
+    });
+    res.end(JSON.stringify(report, null, 2) + '\n');
+  });
+}
+
+serveHTTP(builder.getInterface(), { port: ADDON_PORT })
+  .then(({ server }) => {
+    mountHealth(server);
+    console.log(`Addon listening on http://0.0.0.0:${ADDON_PORT}/manifest.json  (Gerbera: ${GERBERA_URL})`);
+  })
+  .catch(err => {
+    console.error('Could not start the HTTP server:', err.message);
+    process.exit(1);
+  });

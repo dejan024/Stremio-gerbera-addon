@@ -15,10 +15,14 @@ const cinemeta = require('./cinemeta');
 const GERBERA_URL = process.env.GERBERA_URL || 'http://127.0.0.1:49494';
 const REFRESH_MINUTES = Number(process.env.REFRESH_MINUTES || 30);
 const MATCH_IMDB = String(process.env.MATCH_IMDB || 'true') !== 'false';
+// A scan still running after this long is treated as hung — the one failure a
+// container restart can actually clear. See health() below.
+const SCAN_TIMEOUT_MINUTES = Number(process.env.SCAN_TIMEOUT_MINUTES || 10);
 
 const state = {
   ready: false,
   scannedAt: 0,
+  scanStartedAt: 0,    // 0 when no scan is in flight
   error: null,
   movies: [],          // { id, kind, title, year, video }
   others: [],
@@ -171,6 +175,8 @@ async function ensureFresh() {
   if (state.ready && ageMin < REFRESH_MINUTES) return;
   if (scanning) return scanning;
 
+  state.scanStartedAt = Date.now();
+
   // A failed scan never rejects: a refresh keeps serving the previous results,
   // and a failed first scan leaves the library empty with `state.error` set, so
   // the handlers can report the reason instead of returning a bare HTTP 500.
@@ -179,9 +185,58 @@ async function ensureFresh() {
       state.error = err.message;
       console.error('Gerbera scan failed:', err.stack || err.message);
     })
-    .finally(() => { scanning = null; });
+    .finally(() => { scanning = null; state.scanStartedAt = 0; });
 
   return scanning;
 }
 
-module.exports = { state, ensureFresh, describe, GERBERA_URL, REFRESH_MINUTES };
+/**
+ * Snapshot of the addon's own state, behind `GET /health` and the container
+ * healthcheck that polls it.
+ *
+ * `healthy: false` is reported only for a fault a restart can actually clear:
+ * a scan that started and never finished, which leaves every request waiting
+ * on `ensureFresh()` forever. An unreachable Gerbera server is *not* that —
+ * it is reported as `degraded` while staying healthy, because restarting the
+ * addon will not bring the media server back, and a container that restarts
+ * every minute for as long as the server is off is worse than one that keeps
+ * serving its last known library.
+ */
+function health() {
+  const now = Date.now();
+  const scanningFor = state.scanStartedAt ? now - state.scanStartedAt : 0;
+  const hung = scanningFor > SCAN_TIMEOUT_MINUTES * 60000;
+
+  let status;
+  if (hung) status = 'hung';
+  else if (state.error) status = 'degraded';       // last scan failed
+  else if (state.ready) status = 'ok';
+  else status = 'starting';                        // first scan not done yet
+
+  return {
+    status,
+    healthy: !hung,
+    gerbera: GERBERA_URL,
+    error: state.error,
+    lastScan: state.scannedAt ? new Date(state.scannedAt).toISOString() : null,
+    lastScanAgeSeconds: state.scannedAt ? Math.round((now - state.scannedAt) / 1000) : null,
+    scanningForSeconds: state.scanStartedAt ? Math.round(scanningFor / 1000) : null,
+    uptimeSeconds: Math.round(process.uptime()),
+    library: {
+      movies: state.movies.length,
+      series: state.series.length,
+      episodes: state.series.reduce((n, s) => n + s.episodes.length, 0),
+      others: state.others.length,
+      imdbMatches: state.byImdb.size,
+    },
+  };
+}
+
+module.exports = {
+  state,
+  ensureFresh,
+  health,
+  describe,
+  GERBERA_URL,
+  REFRESH_MINUTES,
+};

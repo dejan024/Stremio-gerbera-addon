@@ -11,10 +11,15 @@ services:
       - PORT=${PORT:-7100}
       - REFRESH_MINUTES=${REFRESH_MINUTES:-30}
       - MATCH_IMDB=${MATCH_IMDB:-true}
+      - SCAN_TIMEOUT_MINUTES=${SCAN_TIMEOUT_MINUTES:-10}
       - CACHE_FILE=/app/cache/imdb.json
     volumes:
       # Persists resolved IMDb ids across restarts
       - ./cache:/app/cache
+    # The healthcheck itself lives in the Dockerfile. This label is what lets
+    # the autoheal container below restart this one when it turns unhealthy.
+    labels:
+      - autoheal=true
 
   caddy:
     image: caddy:2-alpine
@@ -29,3 +34,35 @@ services:
       - ./certs:/certs:ro
     depends_on:
       - stremio-gerbera-addon
+    # Polls Caddy's own admin API rather than the proxied addon: a 502 from the
+    # TLS port means the addon is down, and restarting Caddy would not fix that.
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2019/config/ || exit 1"]
+      interval: 60s
+      timeout: 10s
+      start_period: 30s
+      retries: 3
+    labels:
+      - autoheal=true
+
+  # Docker restarts containers that exit, but not ones that stay up while
+  # reporting unhealthy — nothing in the engine acts on a healthcheck. This
+  # watchdog closes that gap: it restarts any container labelled
+  # `autoheal=true` once its healthcheck has failed.
+  #
+  # It needs the Docker socket to do so, which is effectively root on the
+  # host. Drop this service (and the two labels above) if you would rather
+  # not grant that; the healthchecks keep reporting either way, they just
+  # stop acting on their own.
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    container_name: stremio-gerbera-autoheal
+    restart: unless-stopped
+    network_mode: none
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=30
+      - AUTOHEAL_START_PERIOD=60
+      - DOCKER_SOCK=/var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
