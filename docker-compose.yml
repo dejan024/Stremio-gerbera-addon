@@ -32,16 +32,30 @@ services:
       - autoheal=true
 
   caddy:
-    image: caddy:2-alpine
+    # Built rather than pulled: the stock image has no DNS module, which the
+    # Let's Encrypt setup needs. The self-signed setup does not care either way.
+    build:
+      context: .
+      dockerfile: caddy.Dockerfile
     container_name: stremio-gerbera-caddy
     restart: unless-stopped
     network_mode: host
     environment:
       - HTTPS_PORT=${HTTPS_PORT:-7443}
       - PORT=${PORT:-7100}
+      # Only read by Caddyfile.letsencrypt; harmless when empty.
+      - ADDON_DOMAIN=${ADDON_DOMAIN:-}
+      - ACME_EMAIL=${ACME_EMAIL:-}
+      - CF_API_TOKEN=${CF_API_TOKEN:-}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Which of the two Caddyfiles is in use — see .env.example.
+      - ${CADDYFILE:-./Caddyfile}:/etc/caddy/Caddyfile:ro
       - ./certs:/certs:ro
+      # Issued certificates and the ACME account key. Without this volume
+      # every restart asks Let's Encrypt for a new certificate, and their
+      # rate limit (5 per domain per week) is reached quickly.
+      - caddy-data:/data
+      - caddy-config:/config
     depends_on:
       - stremio-gerbera-addon
     # Polls Caddy's own admin API rather than the proxied addon: a 502 from the
@@ -76,3 +90,7 @@ services:
       - DOCKER_SOCK=/var/run/docker.sock
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  caddy-data:
+  caddy-config:

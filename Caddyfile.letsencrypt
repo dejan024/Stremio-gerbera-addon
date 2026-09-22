@@ -1,0 +1,35 @@
+# TLS terminator in front of the addon, with a real Let's Encrypt certificate.
+#
+# Use this instead of the self-signed `Caddyfile` when a client cannot be made
+# to trust a certificate of your own — a Samsung (Tizen) or LG (webOS) TV is
+# the usual case, since neither lets you import one. Point CADDYFILE at this
+# file in `.env`. See the README for the DNS record and the API token.
+
+# ADDON_DOMAIN, ACME_EMAIL and CF_API_TOKEN all have to be set in `.env`.
+# Caddy substitutes them before parsing, so one left empty is not a missing
+# setting but a syntax error, and the container will refuse to start.
+
+{
+    email {$ACME_EMAIL}
+
+    # Nothing here is reachable from the internet, and nothing needs to be:
+    # the certificate is issued over DNS-01. Without this line Caddy would
+    # bind port 80 for an HTTP->HTTPS redirect that no client will ever use.
+    auto_https disable_redirects
+
+    # Local admin API. The container healthcheck polls it to tell "Caddy is
+    # wedged" (restart it) apart from "the addon behind it is down" (do not).
+    admin 127.0.0.1:2019
+}
+
+{$ADDON_DOMAIN}:{$HTTPS_PORT:7443} {
+    tls {
+        dns cloudflare {$CF_API_TOKEN}
+        # Checked directly against public resolvers rather than the host's.
+        # A record pointing at a LAN address tends to upset local resolvers
+        # (DNS rebinding protection), and Caddy's wait for the challenge
+        # record to appear would then never finish.
+        resolvers 1.1.1.1 8.8.8.8
+    }
+    reverse_proxy 127.0.0.1:{$PORT:7100}
+}

@@ -65,8 +65,8 @@ Edit `.env` and point `GERBERA_URL` at your server. Nothing else in it has to
 be touched — posters and descriptions are on by default and need no API key;
 see [Metadata](#metadata) for the optional second provider.
 
-Then generate a certificate (see [HTTPS](#https-why-its-required) below) and
-start it:
+Then set up a certificate (see [HTTPS](#https-why-its-required) below — a
+self-signed one is fine, unless a TV is going to use the addon) and start it:
 
 ```bash
 docker compose up -d --build
@@ -135,6 +135,69 @@ the operating system trust store:
   sudo update-ca-certificates
   ```
 
+### When a client cannot be made to trust it
+
+A TV cannot. Neither Samsung's Tizen nor LG's webOS offers any way to import a
+certificate, and the Stremio app on them shows no "continue anyway" prompt — it
+simply gets nothing back, and the catalog stays empty with no error. Syncing
+the addon from a desktop where the certificate *is* trusted does not help: the
+TV still makes its own request, and fails it on its own.
+
+The way out is a certificate from a real authority, for a real domain name
+whose A record points at this server's **LAN** address. Nothing is published:
+a name is public, the address behind it is not routable from outside, and the
+certificate is proven through a DNS record rather than through an open port.
+
+You need a domain on [Cloudflare](https://www.cloudflare.com/) (its free tier
+is enough; the nameservers are what matters, not where the domain was bought).
+
+**1. Add the DNS record.** In the Cloudflare dashboard, under *DNS → Records*:
+
+| | |
+|---|---|
+| Type | `A` |
+| Name | `gerbera` (giving `gerbera.example.org`) |
+| IPv4 address | this server's LAN address, e.g. `192.168.1.10` |
+| Proxy status | **DNS only** — the grey cloud, not the orange one |
+
+Cloudflare warns that the address is private. That is the intent.
+
+**2. Create an API token.** *My Profile → API Tokens → Create Token*, from the
+*Edit zone DNS* template. It needs `Zone:Read` and `DNS:Edit`, and under *Zone
+Resources* pick the one zone. The token is shown once. It can create and delete
+DNS records in that zone and nothing else — no account access, no other domain.
+
+**3. Point `.env` at the second Caddyfile:**
+
+```ini
+CADDYFILE=./Caddyfile.letsencrypt
+ADDON_DOMAIN=gerbera.example.org
+ACME_EMAIL=you@example.org
+CF_API_TOKEN=<the token from step 2>
+```
+
+**4. Rebuild.** The first build compiles Caddy with its Cloudflare DNS module
+and takes a couple of minutes; later ones are cached.
+
+```bash
+docker compose up -d --build
+```
+
+Watch it get the certificate:
+
+```bash
+docker compose logs -f caddy
+```
+
+`certificate obtained successfully` means it worked. Then install the addon in
+Stremio from `https://gerbera.example.org:7443/manifest.json` — on the desktop,
+if that is where you manage addons; the TV picks it up through account sync.
+Remove the old `https://<ip>:7443/...` entry first, or the two fight over the
+same addon id.
+
+Renewal is automatic and needs no open port either. The certificates live in
+the `caddy-data` volume, so restarts and rebuilds keep them.
+
 ---
 
 ## Configuration
@@ -147,6 +210,10 @@ Everything is configured through environment variables. Copy `.env.example` to
 | `GERBERA_URL` | `http://127.0.0.1:49494` | Base URL of the Gerbera server |
 | `PORT` | `7100` | Port the addon listens on (behind Caddy) |
 | `HTTPS_PORT` | `7443` | Port Caddy serves HTTPS on |
+| `CADDYFILE` | `./Caddyfile` | Which Caddyfile to use — the self-signed one, or `./Caddyfile.letsencrypt` |
+| `ADDON_DOMAIN` | — | Domain the Let's Encrypt certificate is issued for |
+| `ACME_EMAIL` | — | Address Let's Encrypt sends expiry warnings to |
+| `CF_API_TOKEN` | — | Cloudflare token used to answer the DNS-01 challenge |
 | `REFRESH_MINUTES` | `30` | How often the library is rescanned |
 | `MATCH_IMDB` | `true` | Resolve local titles to IMDb ids via Cinemeta |
 | `SCAN_TIMEOUT_MINUTES` | `10` | A scan running longer than this marks the addon unhealthy |
@@ -566,6 +633,25 @@ a pooled socket for the next request.
 **Stremio refuses to install the addon**
 The certificate is not trusted on that machine, or it has no
 `subjectAltName`. See [HTTPS](#https-why-its-required).
+
+**The catalog is empty on a Samsung (Tizen) or LG (webOS) TV, but fine elsewhere**
+Almost always the certificate: a TV has no trust store you can add to, and the
+Stremio app on it reports nothing when TLS fails — just an empty catalog. A
+certificate from a real authority is the fix, see
+[When a client cannot be made to trust it](#when-a-client-cannot-be-made-to-trust-it).
+
+To confirm before changing anything, follow the logs and open the catalog on
+the TV:
+
+```bash
+docker compose logs -f stremio-gerbera-addon caddy
+```
+
+No request arriving at all is TLS or the network. A request that arrives and
+answers `200` means the TV reached the addon, and the cause is elsewhere: the
+catalogs live under **Discover**, not on the home screen, and posters served
+by Gerbera over plain HTTP are blocked as mixed content on some builds, which
+leaves cards blank but titled.
 
 **A film is in the catalog but not offered in search**
 Its filename did not resolve to an IMDb id. It remains playable from the
